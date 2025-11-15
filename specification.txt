@@ -1,0 +1,177 @@
+🟦 AWS Lambda API 仕様書（完全版）
+📌 システム概要
+
+このAPIは、ユーザーが Web アプリからアップロードした スプレッドシート (xlsx) と 画像ファイル を処理し、
+以下を実現するための Lambda ベースバックエンドである。
+
+スプレッドシートを元にコンテンツメタ情報を生成
+
+ファイル名をコンテンツIDとし、DynamoDB に保存
+
+画像は S3 に保存し、コンテンツと紐づけ
+
+Nuxt3 が API からデータを取得して表示（MicroCMS風）
+
+🟥 API 一覧
+機能	メソッド	パス	概要
+スプレッドシートアップロード（解析 & 保存）	POST	/upload-sheet	xlsxを受取り → JSON変換 → DynamoDBへ保存
+画像アップロード用URL発行	POST	/image/upload-url	署名付きURLを発行（S3）
+コンテンツ一覧取得	GET	/contents	DynamoDB から一覧を取得
+コンテンツ詳細取得	GET	/content/{id}	DynamoDB の1件を取得
+
+すべて API Gateway → Lambda により処理される。
+
+🟨 DynamoDB テーブル仕様
+テーブル名：ContentsTable
+属性名	型	説明
+PK	string	root/{ファイル名WithoutExt}（コンテンツID）
+SK	string	固定で meta
+data	map	スプレッドシート解析結果（JSON）
+images	list	画像URLの配列
+updatedAt	string	ISO文字列
+
+例：
+
+PK: root/MyContent
+SK: meta
+data: { title: "サンプル", text: "説明...", id: 123 }
+images: ["https://s3.../MyContent/main.jpg"]
+
+🟩 API 詳細仕様
+1️⃣ POST /upload-sheet
+📌 概要
+
+Nuxt3 のフォームでアップされた xlsx ファイルをバイナリで送信
+→ Lambda が受け取って解析 → DynamoDB に保存する。
+
+◆ リクエスト（multipart/form-data）
+POST /upload-sheet
+Content-Type: multipart/form-data
+
+file: <xlsx file>
+
+◆ 処理フロー
+
+multipart データを Lambda で受け取り
+
+xlsx ライブラリでバイナリ解析
+
+1つ目のシートのみ使用（テンプレートとして固定）
+
+sheet_to_json で JSON に変換
+
+ファイル名（拡張子除く）をコンテンツIDにする
+→ root/{fileName}
+
+DynamoDB に PutItem
+
+SK=meta
+
+data={解析結果}
+
+images=[]（初期状態）
+
+既存データがある場合は上書き保存
+
+◆ レスポンス（成功時）
+{
+  "contentId": "root/MyContent",
+  "message": "Sheet uploaded and stored successfully"
+}
+
+2️⃣ POST /image/upload-url
+📌 概要
+
+Nuxt3が画像をアップロードするための 署名付きURLを Lambda が発行。
+Vue側はこのURLへ直接 PUT する。
+
+◆ リクエスト
+{
+  "contentId": "MyContent",
+  "fileName": "main.jpg"
+}
+
+◆ Lambda処理内容
+
+contentId を受け取り
+
+S3 の保存先を決める：
+
+images/{contentId}/{fileName}
+
+
+Presigned URL（有効30分）を発行
+
+DynamoDB の images[] に URL を追加（アップロード前だが先に登録可）
+
+◆ レスポンス
+{
+  "uploadUrl": "https://s3...presigned-url",
+  "fileUrl": "https://bucket/.../images/MyContent/main.jpg"
+}
+
+3️⃣ GET /contents
+📌 概要
+
+DynamoDB の内容一覧を返す。
+
+◆ レスポンス例
+[
+  {
+    "id": "MyContent",
+    "title": "サンプルタイトル",
+    "updatedAt": "2025-01-01T10:00:00Z"
+  },
+  {
+    "id": "AnotherContent",
+    "title": "別のページ",
+    "updatedAt": "2025-01-02T09:00:00Z"
+  }
+]
+
+4️⃣ GET /content/{id}
+📌 概要
+
+特定IDの1件を返す。
+
+◆ レスポンス例
+{
+  "id": "MyContent",
+  "data": {
+    "title": "サンプル",
+    "text": "説明文",
+    "id": 123
+  },
+  "images": [
+    "https://s3.jp/images/MyContent/main.jpg"
+  ]
+}
+
+🟦 Security（セキュリティ）
+
+API Gateway + Lambda with IAM 認証
+
+JWT 認証（Cognito）併用可能
+
+S3 への直接 PUT は必ず 署名付きURL のみ
+
+DynamoDB トークン等は Secrets Manager 管理
+
+開発者・管理者のみがアップロード可能な構成
+
+🟧 Lambda 内で使用する npm ライブラリ
+用途	ライブラリ
+xlsx 解析	xlsx (sheetjs)
+multipart 解析	busboy or multer
+DynamoDB	@aws-sdk/client-dynamodb
+S3 Presigned URL	@aws-sdk/s3-request-presigner
+🟨 実装難易度と工数
+機能	工数
+スプレッドシート受け取りAPI	1日
+xlsx 解析処理	1日
+DynamoDB 登録処理	0.5日
+画像アップロード URL発行 API	1日
+Nuxt3 側のUI	2〜3日
+全体テスト	1日
+
+合計：5〜7日程度（1人）
